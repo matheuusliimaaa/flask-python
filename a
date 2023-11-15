@@ -1,0 +1,238 @@
+from flask import Flask, request
+from twilio.twiml.messaging_response import MessagingResponse
+import requests
+from bs4 import BeautifulSoup
+
+app = Flask(__name__)
+
+# Variáveis globais para armazenar informações do projeto
+projeto = {
+    "cep": None,
+    "latitude": None,
+    "longitude": None,
+    "local_info": None,
+    "inclinacao_telhado": None,
+    "orientacao_telhado": None,
+    "consumo_medio": None,
+    "area_painel": None,
+    "eficiencia_painel": None,
+    "eficiencia_sistema": None,
+    "perdas_sistema": None,
+    "momento_conversa": 0
+}
+
+# Substitua 'SuaChaveAqui' pela sua chave de API do Google
+chave_api_google = ' '
+
+def obter_lat_lng_por_cep(cep):
+    url = f"https://maps.googleapis.com/maps/api/geocode/json?address={cep}&key={chave_api_google}"
+
+    try:
+        response = requests.get(url)
+        response.raise_for_status()  # Lança uma exceção em caso de erro na solicitação
+        data = response.json()
+
+        if data['status'] == 'OK':
+            location = data['results'][0]['geometry']['location']
+            formatted_address = data['results'][0]['formatted_address']
+            latitude, longitude = location['lat'], location['lng']
+            return latitude, longitude, formatted_address
+        else:
+            raise Exception(f"Erro ao obter coordenadas para o CEP {cep}.")
+
+    except requests.exceptions.RequestException as e:
+        raise Exception(f"Erro na solicitação HTTP: {str(e)}")
+
+def obter_media_diaria_inclinada(latitude, longitude, inclinacao, orientacao):
+    url = f'https://www.radiacaosolar.com.br/ferramenta1/calcular?latitude={latitude}&longitude={longitude}&inclinacao={inclinacao}&orientacao={orientacao}'
+
+    # Cabeçalhos simulando um navegador
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+    }
+
+    try:
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+
+        content = response.text
+        soup = BeautifulSoup(content, 'html.parser')
+
+        # Encontrar a "Média diária inclinada" nos elementos de parágrafo
+        for paragraph in soup.find_all('p'):
+            if 'Média diária inclinada' in paragraph.text:
+                # Extrair o valor da "Média diária inclinada"
+                media_diaria_inclinada = float(paragraph.find('strong').next_sibling.strip().replace(' Wh/m²', '')) / 1000
+                return f'Média diária inclinada: {media_diaria_inclinada:.2f} KWh/m²\nDigite:\n[1] Para continuar\n[2] Para sair'
+
+        raise Exception('Elemento não encontrado: Média diária inclinada')
+
+    except requests.exceptions.RequestException as e:
+        raise Exception(f"Erro na solicitação HTTP: {str(e)}")
+
+def momento_01(mensagem):
+    global projeto
+    if 'oi' in mensagem:
+        projeto["momento_conversa"] = 1
+        return (
+            "Oi, tudo bem? Eu sou um bot programado para te ajudar a falar "
+            "sobre o seu projeto solar. Podemos começar?\nDigite:\n"
+            "[1] Para começar\n[2] Para Sair"
+        )
+    else:
+        return "Desculpe, não entendi. Pode tentar novamente?"
+
+def momento_02():
+    global projeto
+    projeto["momento_conversa"] = 2
+    projeto["cep_digitado"] = None
+    return "Para começar, preciso saber o CEP do local onde será instalado o sistema. Digite apenas os números."
+
+def momento_03(mensagem):
+    global projeto
+    projeto["cep_digitado"] = mensagem
+
+    try:
+        coordenadas = obter_lat_lng_por_cep(projeto["cep_digitado"])
+
+        if coordenadas:
+            projeto["latitude"], projeto["longitude"], projeto["local_info"] = coordenadas
+            projeto["momento_conversa"] = 3
+            return f"CEP {projeto['cep_digitado']} salvo com sucesso! Informações do local:\n{projeto['local_info']}\nLatitude: {projeto['latitude']}\nLongitude: {projeto['longitude']}. Agora podemos prosseguir com outras informações.\nDigite:\n[1] Para continuar\n[2] Para sair"
+        else:
+            raise Exception("Erro ao obter coordenadas. Por favor, tente novamente.")
+
+    except Exception as e:
+        return f"Ocorreu um erro: {str(e)}"
+
+def momento_04():
+    global projeto
+    projeto["momento_conversa"] = 4
+    projeto["inclinacao_telhado"] = None
+    return "Agora insira a inclinação do telhado (em graus), coloque apenas o valor sem símbolos. Exemplo: coloque o número 10 para representar 10 graus."
+
+def momento_05():
+    global projeto
+    projeto["momento_conversa"] = 5
+    projeto["orientacao_telhado"] = None
+    return "Agora insira a orientação do telhado (em graus), coloque apenas o valor sem símbolos. Exemplo: coloque o número 180 para representar 180 graus."
+
+def momento_06(mensagem):
+    global projeto
+    projeto["momento_conversa"] = 6
+    projeto["consumo_medio"] = float(mensagem)
+    return f"Consumo médio salvo com sucesso! Agora podemos calcular a viabilidade do seu projeto.\nDigite:\n[1] Para continuar\n[2] Para sair"
+
+def momento_07(mensagem):
+    global projeto
+    projeto["momento_conversa"] = 7
+    projeto["area_painel"] = float(mensagem)
+    return f"Área do painel salva com sucesso! Agora podemos calcular a viabilidade do seu projeto.\nDigite:\n[1] Para continuar\n[2] Para sair"
+
+def momento_08(mensagem):
+    global projeto
+    projeto["momento_conversa"] = 8
+    projeto["eficiencia_painel"] = float(mensagem) / 100
+    return f"Eficiência do painel salva com sucesso! Agora podemos calcular a viabilidade do seu projeto.\nDigite:\n[1] Para continuar\n[2] Para sair"
+
+def momento_09(mensagem):
+    global projeto
+    projeto["momento_conversa"] = 9
+    perda_sistema = float(mensagem) / 100  # Convertendo de porcentagem para decimal
+    projeto["eficiencia_sistema"] = (100 - perda_sistema) / 100
+    return f"Porcentagem de perdas do sistema salva com sucesso! Eficiência do sistema calculada: {projeto['eficiencia_sistema'] * 100:.2f}%\nDigite:\n[1] Para continuar\n[2] Para sair"
+
+def momento_10(mensagem):
+    global projeto
+    projeto["momento_conversa"] = 10
+
+    # Calcular a média diária inclinada novamente
+    media_diaria_inclinada = obter_media_diaria_inclinada(
+        projeto["latitude"], projeto["longitude"], projeto["inclinacao_telhado"], projeto["orientacao_telhado"]
+    )
+    media_diaria_inclinada = float(
+        media_diaria_inclinada.split(":")[1].replace(' KWh/m²', '').strip())  # Extrair o valor
+
+    # Calcular a quantidade de painéis necessários
+    energia_diaria_necessaria = projeto["consumo_medio"] / projeto["eficiencia_sistema"]
+    quantidade_paineis = energia_diaria_necessaria / (media_diaria_inclinada * projeto["area_painel"])
+
+    # Arredondar para o próximo número inteiro
+    quantidade_paineis = round(quantidade_paineis)
+
+    # Calcular a potência instalada
+    potencia_instalada = quantidade_paineis * projeto["area_painel"] * projeto["eficiencia_painel"]
+
+    # Calcular a potência mínima do inversor (considerando 90% da potência instalada)
+    potencia_minima_inversor = 0.9 * potencia_instalada
+
+    # Calcular a potência máxima do inversor (considerando 110% da potência instalada)
+    potencia_maxima_inversor = 1.1 * potencia_instalada
+
+    # Construir o relatório
+    relatorio = (
+        f"Relatório do Projeto Solar:\n"
+        f"Quantidade de Painéis: {quantidade_paineis}\n"
+        f"Energia Gerada por Cada Painel: {media_diaria_inclinada * projeto['area_painel']:.2f} KWh\n"
+        f"Número de Painéis (arredondado): {quantidade_paineis}\n"
+        f"Potência Instalada: {potencia_instalada:.2f} KWh\n"
+        f"Potência Mínima do Inversor: {potencia_minima_inversor:.2f} KWh\n"
+        f"Potência Máxima do Inversor: {potencia_maxima_inversor:.2f} KWh"
+    )
+    return relatorio
+
+@app.route('/bot', methods=['POST'])
+def bot():
+    global projeto
+    incoming_message = request.values.get('Body', '').lower()
+
+    if projeto["momento_conversa"] == 1:
+        if incoming_message == '1':
+            resposta = momento_02()
+        elif incoming_message == '2':
+            resposta = "Você escolheu sair. Até mais!"
+            projeto["momento_conversa"] = 0
+        else:
+            resposta = "Desculpe, não entendi. Pode tentar novamente?"
+    elif projeto["momento_conversa"] == 2:
+        resposta = momento_03(incoming_message)
+    elif projeto["momento_conversa"] == 3:
+        if incoming_message == '1':
+            resposta = momento_04()
+        elif incoming_message == '2':
+            resposta = "Você escolheu sair. Até mais!"
+            projeto["momento_conversa"] = 0
+        else:
+            resposta = "Desculpe, não entendi. Pode tentar novamente?"
+    elif projeto["momento_conversa"] == 4:
+        projeto["inclinacao_telhado"] = incoming_message
+        resposta = momento_05()
+        projeto["momento_conversa"] = 5
+    elif projeto["momento_conversa"] == 5:
+        projeto["orientacao_telhado"] = incoming_message
+        resposta = obter_media_diaria_inclinada(projeto["latitude"], projeto["longitude"], projeto["inclinacao_telhado"], projeto["orientacao_telhado"])
+        projeto["momento_conversa"] = 6
+    elif projeto["momento_conversa"] == 6:
+        resposta = "Qual é o consumo médio? Insira apenas o valor, exemplo: insira 286 para representar o valor de 286 KWh/mês"
+        projeto["momento_conversa"] = 7
+    elif projeto["momento_conversa"] == 7:
+        resposta = "Qual é a área do painel em m²? Digite apenas o valor, exemplo: digite 1,62 para representar 1,62 m²."
+        projeto["momento_conversa"] = 8
+    elif projeto["momento_conversa"] == 8:
+        resposta = "Qual é a eficiência do painel? Exemplo: digite o número 15 para representar 15%."
+        projeto["momento_conversa"] = 9
+    elif projeto["momento_conversa"] == 9:
+        resposta = "Qual é o percentual de perda do sistema? Exemplo: digite o número 20 para representar 20%."
+        projeto["momento_conversa"] = 10
+    elif projeto["momento_conversa"] == 10:
+        resposta = f"Seu relatório:\n{momento_10(incoming_message)}"
+    else:
+        resposta = momento_01(incoming_message)
+
+    response = MessagingResponse()
+    response.message(resposta)
+
+    return str(response)
+
+if __name__ == '__main__':
+    app.run()
